@@ -1,7 +1,7 @@
 .python311/
 .venv/
 venv/
-_pycache_/
+**pycache**/
 *.pyc
 *.pyo
 *.pyd

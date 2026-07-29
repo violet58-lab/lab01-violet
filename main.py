@@ -1,6 +1,5 @@
 from typing import Any, Dict, List
 from autogen import ConversableAgent
-import json
 import sys
 import os
 import math
@@ -419,70 +418,19 @@ TERMINATE in the same response that requests the function call.
 """.strip()
 
 
-def parse_agent_json(text: str, stage_name: str) -> Dict:
-    """
-    将 Agent 的最终 JSON 输出解析为字典，并在格式错误时给出清晰提示。
-    """
-    if not isinstance(text, str):
-        raise ValueError(f"{stage_name} did not return text.")
-
-    try:
-        result = json.loads(text)
-    except json.JSONDecodeError as error:
-        raise ValueError(
-            f"{stage_name} did not return valid JSON: {text!r}"
-        ) from error
-
-    if not isinstance(result, dict):
-        raise ValueError(f"{stage_name} result must be a JSON object.")
-
-    return result
-
-
-def format_scoring_result(scoring_text: str) -> Dict[str, str]:
-    """
-    验证 Scoring Agent 的最终结果，并确保分数保留至少三位小数。
-    """
-    scoring_data = parse_agent_json(scoring_text, "Scoring Agent")
-
-    if "restaurant_name" not in scoring_data:
-        raise ValueError(
-            "Scoring Agent result is missing restaurant_name."
-        )
-
-    if "overall_score" not in scoring_data:
-        raise ValueError(
-            "Scoring Agent result is missing overall_score."
-        )
-
-    restaurant_name = scoring_data["restaurant_name"]
-    if not isinstance(restaurant_name, str) or not restaurant_name.strip():
-        raise ValueError(
-            "Scoring Agent returned an invalid restaurant name."
-        )
-
-    try:
-        overall_score = float(scoring_data["overall_score"])
-    except (TypeError, ValueError) as error:
-        raise ValueError(
-            "Scoring Agent returned an invalid overall score."
-        ) from error
-
-    return {
-        "restaurant_name": restaurant_name,
-        "overall_score": f"{overall_score:.3f}",
-    }
-
 # Do not modify the signature of the "main" function.
 def main(user_query: str):
+    api_config = {
+        "model": "gpt-4o-mini",
+        "api_key": os.environ.get("OPENAI_API_KEY"),
+    }
+
+    base_url = os.environ.get("OPENAI_BASE_URL")
+    if base_url:
+        api_config["base_url"] = base_url
+
     llm_config = {
-        "config_list": [
-            {
-                "model": "gpt-4o-mini",
-                "api_key": os.environ.get("OPENAI_API_KEY"),
-                "base_url": "https://api.linkapi.ai/v1",
-            }
-        ],
+        "config_list": [api_config],
         "temperature": 0,
     }
 
@@ -596,7 +544,7 @@ restaurant name and the function's score formatted with exactly three decimal
 places.
 """.strip(),
                 "max_turns": 2,
-                "summary_method": "last_msg",
+                "summary_method": summary_without_terminate,
                 "clear_history": True,
                 "silent": True,
             },
