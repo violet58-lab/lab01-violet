@@ -1,111 +1,260 @@
-from __future__ import annotations
-
-import math
-import os
-import re
+from typing import Any, Dict, List
+from autogen import ConversableAgent
+import json
 import sys
-from functools import lru_cache
+import os
+import math
+import re
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
-
-try:
-    # AutoGen is an assignment dependency.  The local scoring path below remains
-    # usable without it so data and formula tests do not require an API call.
-    from autogen import ConversableAgent
-except ImportError:  # pragma: no cover - depends on the caller's environment
-    ConversableAgent = None  # type: ignore[assignment,misc]
 
 
-DATA_FILE = Path(__file__).with_name("restaurant-data.txt")
-
-# The first fifteen entries are the exact rubric supplied by the assignment.
-# "incredibly" and "great" occur in a handful of source rows even though the
-# handout says that every row uses only the listed words.  Treating them as
-# score-five variants preserves the clear meaning of those rows.
-SCORE_BY_ADJECTIVE = {
-    "awful": 1,
-    "horrible": 1,
-    "disgusting": 1,
-    "bad": 2,
-    "unpleasant": 2,
-    "offensive": 2,
-    "average": 3,
-    "uninspiring": 3,
-    "forgettable": 3,
-    "good": 4,
-    "enjoyable": 4,
-    "satisfying": 4,
-    "awesome": 5,
-    "incredible": 5,
-    "amazing": 5,
-    "incredibly": 5,
-    "great": 5,
-}
-
-_ADJECTIVE_PATTERN = re.compile(
-    r"\b(" + "|".join(map(re.escape, SCORE_BY_ADJECTIVE)) + r")\b",
-    flags=re.IGNORECASE,
-)
-_SERVICE_PATTERN = re.compile(
-    r"\b(?:customer\s+service|service|staff|waitstaff|waiters?|waitresses?|"
-    r"servers?|cashiers?|baristas?|employees?|ordering)\b",
-    flags=re.IGNORECASE,
-)
+def is_termination_message(message: Dict[str, Any]) -> bool:
+    """
+    仅当文本消息以 TERMINATE 结尾时结束当前对话。
+    """
+    content = message.get("content", "")
+    return (
+        isinstance(content, str)
+        and content.rstrip().endswith("TERMINATE")
+    )
 
 
-def _normalise_name(value: str) -> str:
-    """Return a punctuation-, spacing-, and case-insensitive lookup key."""
+def summary_without_terminate(
+    sender: ConversableAgent,
+    recipient: ConversableAgent,
+    summary_args: Dict[str, Any],
+) -> str:
+    """
+    保留阶段的最后一条文本消息，但移除其末尾的 TERMINATE。
+    """
+    last_message = recipient.last_message(sender)
 
-    return re.sub(r"[^a-z0-9]+", "", value.casefold())
+    if not last_message:
+        return ""
+
+    content = last_message.get("content", "")
+
+    if not isinstance(content, str):
+        return ""
+
+    return re.sub(
+        r"\s*TERMINATE\s*$",
+        "",
+        content,
+        flags=re.IGNORECASE,
+    ).strip()
 
 
-@lru_cache(maxsize=1)
-def _load_restaurant_data() -> Dict[str, List[str]]:
-    """Read the review file once and preserve its restaurant-name spelling."""
+def normalize_restaurant_name(name: str) -> str:
+    """
+    统一餐厅名称格式。
 
-    restaurants: Dict[str, List[str]] = {}
-    with DATA_FILE.open("r", encoding="utf-8") as data_file:
-        for line_number, raw_line in enumerate(data_file, start=1):
+    例如：
+    Example Bistro、Example-Bistro、example bistro
+    都会转换为 examplebistro。
+    """
+    return re.sub(r"[^a-z0-9]", "", name.casefold())
+
+
+def fetch_restaurant_data(
+    restaurant_name: str
+) -> Dict[str, List[str]]:
+    """
+    从 restaurant-data.txt 中读取指定餐厅的全部评论。
+
+    返回格式：
+    {
+        "餐厅名称": ["评论1", "评论2", ...]
+    }
+    """
+
+    # 找到与 main.py 位于同一个文件夹中的数据文件
+    data_file = Path(__file__).with_name("restaurant-data.txt")
+
+    target_name = normalize_restaurant_name(restaurant_name)
+
+    reviews: List[str] = []
+
+    # 默认使用用户传入的名称。
+    # 找到匹配项后，替换为数据文件中的标准名称。
+    matched_restaurant_name = restaurant_name.strip()
+
+    with data_file.open("r", encoding="utf-8") as file:
+        for raw_line in file:
             line = raw_line.strip()
+
+            # 跳过空行
             if not line:
                 continue
 
-            try:
-                restaurant_name, review = line.split(". ", maxsplit=1)
-            except ValueError as exc:
-                raise ValueError(
-                    f"Malformed restaurant data on line {line_number}: {line!r}"
-                ) from exc
+            # 只按照第一个英文句号进行分割
+            current_name, separator, review = line.partition(".")
 
-            restaurants.setdefault(restaurant_name, []).append(review)
+            # 如果这一行没有句号，说明格式不正确，直接跳过
+            if not separator:
+                continue
 
-    if not restaurants:
-        raise ValueError(f"No restaurant reviews were found in {DATA_FILE}.")
-    return restaurants
+            normalized_current_name = normalize_restaurant_name(current_name)
 
+            if (
+                normalized_current_name == target_name
+                or normalized_current_name in target_name
+            ):
+                matched_restaurant_name = current_name.strip()
+                reviews.append(review.strip())
 
-def _resolve_restaurant_name(query: str) -> str:
-    """Find the canonical data-set name embedded in a natural-language query."""
-
-    normalised_query = _normalise_name(query)
-    matches = [
-        name
-        for name in _load_restaurant_data()
-        if _normalise_name(name) in normalised_query
-    ]
-    if not matches:
-        raise ValueError(f"Could not identify a restaurant in query: {query!r}")
-
-    # Longest-first makes the resolver safe if the data ever gains overlapping
-    # restaurant names.
-    return max(matches, key=lambda name: len(_normalise_name(name)))
+    return {matched_restaurant_name: reviews}
 
 
-def fetch_restaurant_data(restaurant_name: str) -> Dict[str, List[str]]:
-    """Return all reviews for a restaurant using forgiving name matching."""
+SCORE_KEYWORDS = {
+    1: ["awful", "horrible", "disgusting"],
+    2: ["bad", "unpleasant", "offensive"],
+    3: ["average", "uninspiring", "forgettable"],
+    4: ["good", "enjoyable", "satisfying"],
+    5: ["awesome", "incredible", "amazing"],
+}
 
-    canonical_name = _resolve_restaurant_name(restaurant_name)
-    return {canonical_name: list(_load_restaurant_data()[canonical_name])}
+
+def get_review_analysis_prompt(
+    restaurant_name: str,
+    reviews: List[str],
+) -> str:
+    """
+    生成 Review Analysis Agent 使用的提示词。
+    """
+
+    numbered_reviews = "\n".join(
+        f"{index + 1}. {review}"
+        for index, review in enumerate(reviews)
+    )
+    score_placeholders = ", ".join(
+        "integer" for _ in reviews
+    )
+
+    return f"""
+You are a restaurant review analysis agent.
+
+Your task is to analyze every review for the restaurant "{restaurant_name}".
+
+For each review, extract exactly two scores:
+
+1. food_score:
+   The score for the adjective describing the food.
+
+2. customer_service_score:
+   The score for the adjective describing customer service.
+
+You must use only the following fixed mapping:
+
+Score 1:
+awful, horrible, disgusting
+
+Score 2:
+bad, unpleasant, offensive
+
+Score 3:
+average, uninspiring, forgettable
+
+Score 4:
+good, enjoyable, satisfying
+
+Score 5:
+awesome, incredible, amazing
+
+Important rules:
+
+- The mapping above is fixed.
+- Do not use your own opinion.
+- Do not infer a score from words outside the mapping.
+- Analyze every review separately.
+- Determine which scoring adjective describes food.
+- Determine which scoring adjective describes customer service.
+- Preserve the original review order.
+- Return exactly one food score and one customer-service score per review.
+- Return only valid JSON.
+- Do not include Markdown code fences.
+- Do not include explanations before or after the JSON.
+
+The output must use exactly this structure:
+
+{{
+    "restaurant_name": "{restaurant_name}",
+    "food_scores": [{score_placeholders}],
+    "customer_service_scores": [{score_placeholders}]
+}}
+
+Reviews:
+
+{numbered_reviews}
+""".strip()
+
+
+def validate_review_scores(
+    analysis_data: Dict,
+    expected_review_count: int,
+) -> None:
+    """
+    检查 Review Analysis Agent 的结果是否有效。
+    """
+
+    required_keys = {
+        "restaurant_name",
+        "food_scores",
+        "customer_service_scores",
+    }
+
+    if not isinstance(analysis_data, dict):
+        raise ValueError(
+            "Review analysis result must be a JSON object."
+        )
+
+    if not required_keys.issubset(analysis_data):
+        raise ValueError(
+            "Review analysis result is missing required keys."
+        )
+
+    food_scores = analysis_data["food_scores"]
+    service_scores = analysis_data["customer_service_scores"]
+
+    if not isinstance(food_scores, list):
+        raise ValueError("Food scores must be a list.")
+
+    if not isinstance(service_scores, list):
+        raise ValueError(
+            "Customer-service scores must be a list."
+        )
+
+    if len(food_scores) != expected_review_count:
+        raise ValueError(
+            "The number of food scores does not match "
+            "the number of reviews."
+        )
+
+    if len(service_scores) != expected_review_count:
+        raise ValueError(
+            "The number of customer-service scores does not match "
+            "the number of reviews."
+        )
+
+    valid_scores = {1, 2, 3, 4, 5}
+
+    if any(
+        isinstance(score, bool)
+        or not isinstance(score, int)
+        or score not in valid_scores
+        for score in food_scores
+    ):
+        raise ValueError("Invalid food score detected.")
+
+    if any(
+        isinstance(score, bool)
+        or not isinstance(score, int)
+        or score not in valid_scores
+        for score in service_scores
+    ):
+        raise ValueError(
+            "Invalid customer-service score detected."
+        )
 
 
 def calculate_overall_score(
@@ -113,273 +262,360 @@ def calculate_overall_score(
     food_scores: List[int],
     customer_service_scores: List[int],
 ) -> Dict[str, float]:
-    """Calculate the assignment's weighted geometric-mean score."""
+    """
+    根据每条评论的食物分和服务分计算餐厅总分。
 
-    if not food_scores:
-        raise ValueError("At least one review score is required.")
+    food_scores 和 customer_service_scores 中的元素
+    都应该是 1～5 的整数。
+    """
+
     if len(food_scores) != len(customer_service_scores):
-        raise ValueError(
-            "food_scores and customer_service_scores must have the same length."
-        )
+        raise ValueError("食物评分和服务评分的数量必须相同。")
 
-    all_scores = [*food_scores, *customer_service_scores]
-    if any(
-        isinstance(score, bool) or not isinstance(score, int) or not 1 <= score <= 5
-        for score in all_scores
+    if len(food_scores) == 0:
+        raise ValueError("评分列表不能为空。")
+
+    all_scores = food_scores + customer_service_scores
+
+    if any(score < 1 or score > 5 for score in all_scores):
+        raise ValueError("每个评分必须在 1 到 5 之间。")
+
+    number_of_reviews = len(food_scores)
+
+    weighted_score_sum = 0.0
+
+    for food_score, service_score in zip(
+        food_scores,
+        customer_service_scores,
     ):
-        raise ValueError("Every food and customer-service score must be an integer from 1 to 5.")
-
-    review_count = len(food_scores)
-    weighted_sum = sum(
-        math.sqrt(food_score**2 * service_score)
-        for food_score, service_score in zip(
-            food_scores, customer_service_scores
+        review_score = math.sqrt(
+            food_score ** 2 * service_score
         )
+        weighted_score_sum += review_score
+
+    overall_score = (
+        weighted_score_sum
+        * 10
+        / (number_of_reviews * math.sqrt(125))
     )
-    overall_score = weighted_sum * 10 / (review_count * math.sqrt(125))
-    return {restaurant_name: round(overall_score, 3)}
+
+    # 按作业要求至少保留三位小数精度
+    return {
+        restaurant_name: round(overall_score, 3)
+    }
+
+
+def print_score_result(score_result: Dict[str, float]) -> None:
+    restaurant_name, overall_score = next(iter(score_result.items()))
+    print(f"{restaurant_name} overall score: {overall_score:.3f}")
 
 
 def get_data_fetch_agent_prompt(restaurant_query: str) -> str:
-    """Build the data-fetch agent prompt requested by the lab."""
-
+    """
+    生成 Data Fetch Agent 使用的提示词。
+    """
     return f"""
-Identify the valid restaurant named in the user's query below. Restaurant names
-may differ in case, whitespace, apostrophes, or hyphens. Call
-fetch_restaurant_data exactly once with only that restaurant name. Do not invent
-reviews or answer the scoring question yourself.
+Identify the restaurant in the following user question and fetch its reviews:
 
-User query: {restaurant_query}
+{restaurant_query}
+
+You must call fetch_restaurant_data with only the restaurant name. After the
+tool result is returned, preserve every review and return the required JSON.
 """.strip()
 
 
-def get_review_analyzer_agent_prompt() -> str:
-    """Return explicit, deterministic instructions for a review analyzer."""
+ENTRYPOINT_AGENT_SYSTEM_MESSAGE = """
+You are the Supervisor and Orchestrator for a restaurant-scoring workflow.
 
-    return """
-Analyze every supplied review in order. For each review, output one food_score
-and one customer_service_score. Use only this mapping:
-1 = awful/horrible/disgusting
-2 = bad/unpleasant/offensive
-3 = average/uninspiring/forgettable
-4 = good/enjoyable/satisfying
-5 = awesome/incredible/amazing
+You must coordinate the work in this exact order:
+1. Fetch restaurant data.
+2. Analyze every fetched review.
+3. Calculate the overall score.
 
-Associate each adjective with the subject it describes; do not let an extra
-adjective about food become the service score. Return the two complete integer
-lists and no aggregate score.
+You execute Python functions requested by the specialized agents. You may
+execute only registered Python functions. Never invent or alter reviews. Never
+create food scores or customer-service scores yourself. Never estimate or
+approximate the final score yourself. Pass the complete structured result from
+each stage to the next stage. The final result must contain the restaurant name
+and an overall score displayed with at least three digits after the decimal
+point.
 """.strip()
 
 
-def get_scoring_agent_prompt() -> str:
-    """Return instructions for an agent that invokes the final score function."""
+DATA_FETCH_AGENT_SYSTEM_MESSAGE = """
+You are the Data Fetch Agent in a sequential restaurant-scoring workflow.
 
-    return """
-Use every food score and customer-service score supplied by the review analyzer,
-preserving their order. Call calculate_overall_score exactly once with the
-canonical restaurant name and the two complete integer lists. Report the
-returned overall score with exactly three digits after the decimal point.
+Your only responsibilities are:
+1. Identify the restaurant name in the user's question.
+2. Request exactly one call to fetch_restaurant_data(restaurant_name).
+3. After receiving the function result, return the canonical restaurant name
+   and every review from that result.
+
+The fetch_restaurant_data tool is the only allowed source of restaurant data.
+Do not open or read restaurant-data.txt yourself. Do not analyze reviews,
+generate scores, calculate an overall score, invent reviews, edit reviews, or
+omit reviews.
+
+After the tool returns, respond with valid JSON, without Markdown or
+explanatory text, in exactly this shape:
+{
+  "restaurant_name": "canonical name from the tool result",
+  "reviews": ["review 1", "review 2"]
+}
+The reviews array must contain all returned reviews in their original order.
+Only after fetch_restaurant_data has executed successfully and its complete
+result has been received, write TERMINATE on its own line after the JSON. Never
+write TERMINATE in the same response that requests the function call.
 """.strip()
 
 
-def _extract_review_scores(review: str) -> Tuple[int, int]:
-    """Extract food and service scores from one semi-structured review.
+REVIEW_ANALYSIS_AGENT_SYSTEM_MESSAGE = """
+You are the Review Analysis Agent in a sequential restaurant-scoring workflow.
+Your input is structured JSON containing restaurant_name and reviews from the
+Data Fetch Agent.
 
-    The generated data consistently introduces the food opinion first.  Service
-    wording varies more, so its adjective is selected by proximity to the first
-    service-related noun.  This also avoids choosing later food synonyms in rows
-    containing more than the two adjectives promised by the handout.
+Analyze every review separately and extract exactly one food_score and exactly
+one customer_service_score from each review. Use only this fixed mapping:
+
+1: awful, horrible, disgusting
+2: bad, unpleasant, offensive
+3: average, uninspiring, forgettable
+4: good, enjoyable, satisfying
+5: awesome, incredible, amazing
+
+Determine which mapped adjective describes the food and which describes
+customer service. Do not use subjective judgment or words outside the mapping.
+Do not call any Python function. Do not omit, duplicate, reorder, or modify any
+review. The food_scores and customer_service_scores arrays must have equal
+lengths, and each length must exactly equal the number of input reviews.
+
+Respond with exactly these four lines, without Markdown or explanatory text:
+restaurant_name: <the input restaurant name>
+food_scores: [one integer per review]
+customer_service_scores: [one integer per review]
+TERMINATE
+""".strip()
+
+
+SCORING_AGENT_SYSTEM_MESSAGE = """
+You are the Scoring Agent in a sequential restaurant-scoring workflow. Your
+required input is the Review Analysis Agent's structured result containing
+restaurant_name, food_scores, and customer_service_scores. It is supplied
+through sequential-chat carryover.
+
+First verify that food_scores and customer_service_scores have equal lengths.
+Then request exactly one call to calculate_overall_score using the restaurant
+name and both complete, unchanged score arrays. Do not inspect or reanalyze raw
+reviews. Do not delete, reorder, change, or add scores. Do not manually
+calculate, estimate, or approximate the overall score.
+
+Only after calculate_overall_score has executed successfully and its result has
+been received, respond with exactly this sentence:
+<restaurant_name> has an overall score of <score>.
+
+Format <score> with exactly three digits after the decimal point. Use only the
+value returned by the tool. Then write TERMINATE on its own line. Never write
+TERMINATE in the same response that requests the function call.
+""".strip()
+
+
+def parse_agent_json(text: str, stage_name: str) -> Dict:
     """
-
-    adjective_matches = list(_ADJECTIVE_PATTERN.finditer(review))
-    if not adjective_matches:
-        raise ValueError(f"Review contains no recognized score adjective: {review!r}")
-
-    food_match = adjective_matches[0]
-    service_anchor = _SERVICE_PATTERN.search(review)
-
-    if service_anchor is None:
-        # This is only a defensive fallback for future data.  Current rows all
-        # have a service/employee anchor.
-        service_match = (
-            adjective_matches[1]
-            if len(adjective_matches) > 1
-            else adjective_matches[0]
-        )
-    else:
-        anchor_midpoint = (service_anchor.start() + service_anchor.end()) / 2
-        service_match = min(
-            adjective_matches,
-            key=lambda match: abs(
-                (match.start() + match.end()) / 2 - anchor_midpoint
-            ),
-        )
-
-    return (
-        SCORE_BY_ADJECTIVE[food_match.group(0).casefold()],
-        SCORE_BY_ADJECTIVE[service_match.group(0).casefold()],
-    )
-
-
-def analyze_reviews(reviews: Sequence[str]) -> Tuple[List[int], List[int]]:
-    """Score every review and return parallel food and service lists."""
-
-    food_scores: List[int] = []
-    customer_service_scores: List[int] = []
-    for review in reviews:
-        food_score, service_score = _extract_review_scores(review)
-        food_scores.append(food_score)
-        customer_service_scores.append(service_score)
-    return food_scores, customer_service_scores
-
-
-def _create_autogen_agents():
-    """Create the three documented lab roles for optional interactive use.
-
-    The core calculation is intentionally local and deterministic because the
-    assignment's rubric is a fixed keyword mapping.  These agents expose the
-    prompts and tools needed to experiment with the recommended AutoGen design
-    when an API key and the dependency are available.
+    将 Agent 的最终 JSON 输出解析为字典，并在格式错误时给出清晰提示。
     """
+    if not isinstance(text, str):
+        raise ValueError(f"{stage_name} did not return text.")
 
-    if ConversableAgent is None:
-        raise RuntimeError(
-            "AutoGen is not installed. Install requirements.txt to create agents."
+    try:
+        result = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            f"{stage_name} did not return valid JSON: {text!r}"
+        ) from error
+
+    if not isinstance(result, dict):
+        raise ValueError(f"{stage_name} result must be a JSON object.")
+
+    return result
+
+
+def format_scoring_result(scoring_text: str) -> Dict[str, str]:
+    """
+    验证 Scoring Agent 的最终结果，并确保分数保留至少三位小数。
+    """
+    scoring_data = parse_agent_json(scoring_text, "Scoring Agent")
+
+    if "restaurant_name" not in scoring_data:
+        raise ValueError(
+            "Scoring Agent result is missing restaurant_name."
         )
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY must be set to create AutoGen agents.")
 
+    if "overall_score" not in scoring_data:
+        raise ValueError(
+            "Scoring Agent result is missing overall_score."
+        )
+
+    restaurant_name = scoring_data["restaurant_name"]
+    if not isinstance(restaurant_name, str) or not restaurant_name.strip():
+        raise ValueError(
+            "Scoring Agent returned an invalid restaurant name."
+        )
+
+    try:
+        overall_score = float(scoring_data["overall_score"])
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "Scoring Agent returned an invalid overall score."
+        ) from error
+
+    return {
+        "restaurant_name": restaurant_name,
+        "overall_score": f"{overall_score:.3f}",
+    }
+
+# Do not modify the signature of the "main" function.
+def main(user_query: str):
     llm_config = {
-        "config_list": [{"model": "gpt-4o-mini", "api_key": api_key}],
+        "config_list": [
+            {
+                "model": "gpt-4o-mini",
+                "api_key": os.environ.get("OPENAI_API_KEY"),
+            }
+        ],
         "temperature": 0,
     }
+
     entrypoint_agent = ConversableAgent(
-        "entrypoint_agent",
-        system_message=(
-            "Coordinate restaurant data retrieval, review analysis, and final "
-            "scoring. Execute registered tools when another agent requests them."
-        ),
+        name="entrypoint_agent",
+        system_message=ENTRYPOINT_AGENT_SYSTEM_MESSAGE,
         llm_config=llm_config,
         human_input_mode="NEVER",
+        is_termination_msg=is_termination_message,
+        max_consecutive_auto_reply=4,
     )
+
     data_fetch_agent = ConversableAgent(
-        "data_fetch_agent",
-        system_message=get_data_fetch_agent_prompt(
-            "Use the restaurant name from the active user query."
-        ),
+        name="data_fetch_agent",
+        system_message=DATA_FETCH_AGENT_SYSTEM_MESSAGE,
         llm_config=llm_config,
         human_input_mode="NEVER",
+        is_termination_msg=is_termination_message,
     )
-    review_analyzer_agent = ConversableAgent(
-        "review_analyzer_agent",
-        system_message=get_review_analyzer_agent_prompt(),
+
+    review_analysis_agent = ConversableAgent(
+        name="review_analysis_agent",
+        system_message=REVIEW_ANALYSIS_AGENT_SYSTEM_MESSAGE,
         llm_config=llm_config,
         human_input_mode="NEVER",
+        is_termination_msg=is_termination_message,
     )
+
     scoring_agent = ConversableAgent(
-        "scoring_agent",
-        system_message=get_scoring_agent_prompt(),
+        name="scoring_agent",
+        system_message=SCORING_AGENT_SYSTEM_MESSAGE,
         llm_config=llm_config,
         human_input_mode="NEVER",
+        is_termination_msg=is_termination_message,
     )
 
     data_fetch_agent.register_for_llm(
         name="fetch_restaurant_data",
-        description="Fetch every review for one valid restaurant.",
+        description="Fetch all reviews for a specified restaurant.",
     )(fetch_restaurant_data)
-    entrypoint_agent.register_for_execution(name="fetch_restaurant_data")(
-        fetch_restaurant_data
-    )
+    entrypoint_agent.register_for_execution(
+        name="fetch_restaurant_data"
+    )(fetch_restaurant_data)
+
     scoring_agent.register_for_llm(
         name="calculate_overall_score",
-        description="Calculate the final 0-to-10 restaurant score.",
+        description=(
+            "Calculate the overall restaurant score from the restaurant name, "
+            "food scores, and customer service scores."
+        ),
     )(calculate_overall_score)
-    entrypoint_agent.register_for_execution(name="calculate_overall_score")(
-        calculate_overall_score
-    )
+    entrypoint_agent.register_for_execution(
+        name="calculate_overall_score"
+    )(calculate_overall_score)
 
-    return (
-        entrypoint_agent,
-        data_fetch_agent,
-        review_analyzer_agent,
-        scoring_agent,
-    )
-
-
-def run_autogen_workflow(user_query: str):
-    """Run the lab's recommended sequential AutoGen conversation.
-
-    This optional entry point is useful for inspecting the agent interaction.
-    ``main`` uses the equivalent deterministic pipeline so grading does not
-    depend on network availability, API cost, or stochastic model output.
-    """
-
-    (
-        entrypoint_agent,
-        data_fetch_agent,
-        review_analyzer_agent,
-        scoring_agent,
-    ) = _create_autogen_agents()
-    return entrypoint_agent.initiate_chats(
+    results = entrypoint_agent.initiate_chats(
         [
             {
                 "recipient": data_fetch_agent,
-                "message": get_data_fetch_agent_prompt(user_query),
-                "max_turns": 3,
-                "summary_method": "reflection_with_llm",
-                "summary_args": {
-                    "summary_prompt": (
-                        "Return the canonical restaurant name and every fetched "
-                        "review verbatim."
-                    )
-                },
+                "message": f"""
+Analyze the user's restaurant query:
+
+{user_query}
+
+Identify the restaurant name and call fetch_restaurant_data exactly once.
+After the function result is returned, preserve and return the complete
+restaurant name and every review exactly as returned, in the original order.
+
+Do not evaluate, score, shorten, merge, rewrite, or omit any review. Do not
+calculate the overall score.
+""".strip(),
+                "max_turns": 2,
+                "summary_method": summary_without_terminate,
+                "clear_history": True,
+                "silent": True,
             },
             {
-                "recipient": review_analyzer_agent,
-                "message": (
-                    "Score every fetched review according to your system "
-                    "instructions."
-                ),
-                "max_turns": 2,
-                "summary_method": "reflection_with_llm",
-                "summary_args": {
-                    "summary_prompt": (
-                        "Return the canonical restaurant name plus the complete "
-                        "food_scores and customer_service_scores integer lists."
-                    )
-                },
+                "recipient": review_analysis_agent,
+                "message": """
+Use the complete restaurant name and reviews from the carryover.
+
+Analyze every review exactly once using only the fixed keyword mapping defined
+in your system message. Find the mapped adjective that describes food and the
+mapped adjective that describes customer service in each review.
+
+Return only one structured result containing restaurant_name, food_scores, and
+customer_service_scores. Preserve review order. Do not omit, duplicate,
+reorder, reinterpret, or modify any score.
+
+The two score lists must have equal lengths, and each length must equal the
+number of reviews. Do not call calculate_overall_score and do not calculate the
+overall score.
+""".strip(),
+                "max_turns": 1,
+                "summary_method": summary_without_terminate,
+                "clear_history": True,
+                "silent": True,
             },
             {
                 "recipient": scoring_agent,
-                "message": (
-                    "Use the analyzer's complete score lists to calculate and "
-                    "report the restaurant's final score."
-                ),
-                "max_turns": 3,
+                "message": """
+Use the structured restaurant_name, food_scores, and customer_service_scores
+from the carryover.
+
+Call calculate_overall_score exactly once with the complete, unmodified
+arguments. Do not delete, add, change, or reorder any score, and do not
+calculate or estimate the overall score yourself.
+
+After receiving the function result, return a final sentence containing the
+restaurant name and the function's score formatted with exactly three decimal
+places.
+""".strip(),
+                "max_turns": 2,
                 "summary_method": "last_msg",
+                "clear_history": True,
+                "silent": True,
             },
         ]
     )
 
+    if len(results) != 3:
+        raise RuntimeError(
+            "The sequential workflow did not complete all three stages."
+        )
 
-# Do not modify the signature of the "main" function.
-def main(user_query: str):
-    """Answer a restaurant query and print an autograder-friendly score."""
+    final_answer = results[-1].summary
 
-    restaurant_data = fetch_restaurant_data(user_query)
-    restaurant_name, reviews = next(iter(restaurant_data.items()))
-    food_scores, customer_service_scores = analyze_reviews(reviews)
-    result = calculate_overall_score(
-        restaurant_name, food_scores, customer_service_scores
-    )
-    print(f"{restaurant_name}: {result[restaurant_name]:.3f}")
-    return result
+    if final_answer:
+        final_answer = final_answer.strip()
+        print(final_answer)
 
+    return final_answer
 
 # DO NOT modify this code below.
 if __name__ == "__main__":
-    assert len(sys.argv) > 1, (
-        "Please ensure you include a query for some restaurant when executing main."
-    )
+    assert len(sys.argv) > 1, "Please ensure you include a query for some restaurant when executing main."
     main(sys.argv[1])

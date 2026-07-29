@@ -1,0 +1,9 @@
+.python311/
+.venv/
+venv/
+_pycache_/
+*.pyc
+*.pyo
+*.pyd
+python-*.exe
+runtime-log.txt
