@@ -57,7 +57,7 @@ For $N$ reviews, let $f_i$ be the food score and $s_i$ be the
 customer-service score of review $i$. The overall score is:
 
 ```math
-\operatorname{OverallScore}
+\mathrm{OverallScore}
 =
 \frac{10}{N\sqrt{125}}
 \sum_{i=1}^{N}
