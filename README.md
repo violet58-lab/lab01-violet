@@ -60,7 +60,11 @@ $$
 =
 \frac{10}{N\sqrt{125}}
 \sum_{i=1}^{N}
-\sqrt{\text{food\_score}_i^2 \times \text{customer\_service\_score}_i}
+\sqrt{
+\text{food\_score}_i^2
+\times
+\text{customer\_service\_score}_i
+}
 $$
 
 `calculate_overall_score` rounds the result to three decimal places.
