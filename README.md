@@ -53,19 +53,18 @@ For every review, the analysis produces:
 - `food_score`
 - `customer_service_score`
 
-For $N$ reviews, the implementation calculates the overall score as:
+For $N$ reviews, let $f_i$ be the food score and $s_i$ be the
+customer-service score of review $i$. The overall score is:
 
-$$
-\text{overall score}
+```math
+\operatorname{OverallScore}
 =
 \frac{10}{N\sqrt{125}}
 \sum_{i=1}^{N}
-\sqrt{
-\text{food\_score}_i^2
-\times
-\text{customer\_service\_score}_i
-}
-$$
+\sqrt{f_i^{2}s_i}
+```
+
+where $N$ is the total number of reviews.
 
 `calculate_overall_score` rounds the result to three decimal places.
 
