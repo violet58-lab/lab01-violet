@@ -480,6 +480,7 @@ def main(user_query: str):
             {
                 "model": "gpt-4o-mini",
                 "api_key": os.environ.get("OPENAI_API_KEY"),
+                "base_url": "https://api.linkapi.ai/v1",
             }
         ],
         "temperature": 0,
